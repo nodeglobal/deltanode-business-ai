@@ -337,14 +337,20 @@ get_valid_telegram_token() {
 configure_openclaw() {
     print_info "Configuring your assistant..."
 
-    # Set LLM provider
-    run_silent openclaw config set llm.provider anthropic
-    run_silent openclaw config set llm.apiKey "$CLAUDE_KEY"
-    run_silent openclaw config set llm.model "claude-sonnet-4-6"
+    # Set up Anthropic API key
+    echo "$CLAUDE_KEY" | openclaw models auth paste-token --provider anthropic >> "$LOG_FILE" 2>&1
 
-    # Set Telegram channel
-    run_silent openclaw config set channels.telegram.enabled true
-    run_silent openclaw config set channels.telegram.botToken "$TELEGRAM_TOKEN"
+    # Set default model to Claude Sonnet
+    openclaw models set anthropic/claude-sonnet-4-6 >> "$LOG_FILE" 2>&1 || true
+
+    # Enable Telegram plugin
+    openclaw plugins enable telegram >> "$LOG_FILE" 2>&1
+
+    # Add Telegram channel with bot token
+    openclaw channels add --channel telegram --token "$TELEGRAM_TOKEN" >> "$LOG_FILE" 2>&1
+
+    # Set gateway mode to local
+    openclaw config set gateway.mode local >> "$LOG_FILE" 2>&1 || true
 
     print_success "Assistant configured"
 }
@@ -399,7 +405,7 @@ setup_autostart_mac() {
     <key>ProgramArguments</key>
     <array>
         <string>$openclaw_path</string>
-        <string>start</string>
+        <string>gateway</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -435,7 +441,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$openclaw_path start
+ExecStart=$openclaw_path gateway
 Restart=always
 RestartSec=10
 WorkingDirectory=$HOME/.openclaw
@@ -452,15 +458,116 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Setup scheduled tasks (daily briefing, weekly summary)
+# ─────────────────────────────────────────────────────────────────────────────
+setup_scheduled_tasks() {
+    print_info "Setting up scheduled briefings..."
+
+    # Wait for gateway to be fully ready
+    local max_wait=30
+    local waited=0
+    while [ $waited -lt $max_wait ]; do
+        if openclaw gateway status --json 2>/dev/null | grep -q '"ready":true'; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    if [ $waited -ge $max_wait ]; then
+        print_warning "Gateway may not be fully ready, but continuing..."
+    fi
+
+    # Remove any existing scheduled jobs first
+    openclaw cron rm --name "daily-briefing" >> "$LOG_FILE" 2>&1 || true
+    openclaw cron rm --name "weekly-summary" >> "$LOG_FILE" 2>&1 || true
+
+    # Daily briefing at 8am local time
+    openclaw cron add \
+        --name "daily-briefing" \
+        --cron "0 8 * * *" \
+        --message "Good morning! Please give me my daily briefing. Include today's date, any tasks or reminders I have, and a motivational thought to start the day." \
+        --channel telegram \
+        --announce \
+        --description "Daily morning briefing at 8am" \
+        >> "$LOG_FILE" 2>&1 && print_success "Daily briefing scheduled (8am)" || print_warning "Could not schedule daily briefing"
+
+    # Weekly summary every Friday at 6pm
+    openclaw cron add \
+        --name "weekly-summary" \
+        --cron "0 18 * * 5" \
+        --message "It's Friday evening. Please give me my weekly summary. Summarize what we worked on this week, any pending items, and suggest priorities for next week." \
+        --channel telegram \
+        --announce \
+        --description "Weekly summary every Friday at 6pm" \
+        >> "$LOG_FILE" 2>&1 && print_success "Weekly summary scheduled (Friday 6pm)" || print_warning "Could not schedule weekly summary"
+
+    log "Cron jobs configured"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Initialize memory directories
+# ─────────────────────────────────────────────────────────────────────────────
+setup_memory() {
+    print_info "Initializing memory system..."
+
+    local memory_dir="$HOME/.openclaw/memory"
+    mkdir -p "$memory_dir"
+
+    # Create initial memory structure
+    if [ ! -f "$memory_dir/user-profile.md" ]; then
+        cat > "$memory_dir/user-profile.md" << 'EOF'
+# User Profile
+
+## About
+- Name: (will be learned from conversation)
+- Role: (will be learned)
+- Company: (will be learned)
+
+## Preferences
+- Communication style: (will be learned)
+- Working hours: (will be learned)
+
+## Ongoing Projects
+(will be populated as we discuss projects)
+
+## Key People
+(will be populated as people are mentioned)
+EOF
+    fi
+
+    if [ ! -f "$memory_dir/tasks.md" ]; then
+        cat > "$memory_dir/tasks.md" << 'EOF'
+# Tasks & Reminders
+
+## Active Tasks
+(no tasks yet)
+
+## Completed
+(none yet)
+
+## Follow-ups
+(none scheduled)
+EOF
+    fi
+
+    # Index memory files
+    openclaw memory index >> "$LOG_FILE" 2>&1 || true
+
+    print_success "Memory system initialized"
+    log "Memory initialized"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Start assistant
 # ─────────────────────────────────────────────────────────────────────────────
 start_assistant() {
     print_info "Starting your assistant..."
 
-    # Start openclaw in background
-    nohup openclaw start >> "$LOG_FILE" 2>&1 &
+    # Start openclaw gateway in background
+    nohup openclaw gateway >> "$LOG_FILE" 2>&1 &
 
-    sleep 3
+    sleep 5
 
     # Verify it's running
     if pgrep -f "openclaw" > /dev/null; then
@@ -543,16 +650,25 @@ main() {
         setup_autostart_linux
     fi
 
-    # Start
+    # Initialize memory and scheduled tasks
+    setup_memory
+
+    # Start the gateway first (needed for cron setup)
     start_assistant
+
+    # Setup scheduled briefings (requires gateway to be running)
+    sleep 2
+    setup_scheduled_tasks
 
     # Success!
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  🎉 Your AI assistant is live!${NC}"
+    echo -e "${GREEN}  Your AI assistant is live!${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════${NC}"
     echo ""
-    echo "  Open Telegram and message your bot to get started."
+    echo -e "  ${BOLD}IMPORTANT: Message your bot now to activate it.${NC}"
+    echo "  Open Telegram and send any message to start."
+    echo ""
     echo "  Try saying: \"What can you help me with?\""
     echo ""
     echo "  Your assistant will:"
@@ -560,7 +676,9 @@ main() {
     echo "  • Help draft emails and content"
     echo "  • Prepare you for meetings"
     echo "  • Track follow-ups and reminders"
-    echo "  • Summarise your week every Friday"
+    echo "  • Summarise your week every Friday at 6pm"
+    echo ""
+    echo "  Your data stays on your machine. Nothing is stored externally."
     echo ""
     echo "  Logs: $LOG_FILE"
     echo "  Support: support@deltanodeglobal.com"
