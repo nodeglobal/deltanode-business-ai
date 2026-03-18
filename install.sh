@@ -12,7 +12,7 @@ set -e
 VERSION="1.0.0"
 INSTALL_DIR="$HOME/.deltanode"
 LOG_FILE="$INSTALL_DIR/install.log"
-SKILLS_URL="https://deltanode.io/kit/skills.tar.gz"
+SKILLS_URL="https://github.com/nodeglobal/deltanode-business-ai/releases/download/v1.0/business-ai-kit.tar.gz"
 MAX_ATTEMPTS=3
 
 # ─────────────────────────────────────────────────────────────────────────────
